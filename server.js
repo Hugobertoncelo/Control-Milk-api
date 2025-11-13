@@ -20,7 +20,7 @@ server.put('/settings', (req, res) => {
   res.json(db.get('settings').value());
 });
 
-server.use('/days', router);
+server.use(router);
 
 const port = process.env.PORT || 8080;
 server.listen(port, () => {
