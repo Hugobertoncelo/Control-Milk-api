@@ -11,16 +11,27 @@ const BACKUP_URL = 'https://api.jsonbin.io/v3/b';
 const BACKUP_KEY = process.env.JSONBIN_API_KEY || '$2a$10$YourAPIKeyHere';
 let BACKUP_ID = process.env.JSONBIN_BIN_ID || null;
 
+let memoryCache = null;
+let lastSaveTime = null;
+
 const saveData = async (data) => {
   const filePath = path.join(__dirname, 'db.json');
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
   console.log('💾 Data saved to db.json at', new Date().toLocaleTimeString());
+
+  memoryCache = data;
+  lastSaveTime = new Date().toISOString();
 
   await saveToExternalBackup(data);
 };
 
 const saveToExternalBackup = async (data) => {
   try {
+    if (!BACKUP_KEY || BACKUP_KEY === '$2a$10$YourAPIKeyHere') {
+      console.log('⚠️ No valid API key - using local backup only');
+      return;
+    }
+
     const config = {
       headers: {
         'Content-Type': 'application/json',
@@ -32,13 +43,12 @@ const saveToExternalBackup = async (data) => {
       await axios.put(`${BACKUP_URL}/${BACKUP_ID}`, data, config);
       console.log('☁️ External backup updated successfully');
     } else {
-
       const response = await axios.post(BACKUP_URL, data, config);
       BACKUP_ID = response.data.metadata.id;
       console.log('☁️ External backup created with ID:', BACKUP_ID);
     }
   } catch (error) {
-    console.error('❌ External backup failed:', error.message);
+    console.error('❌ External backup failed:', error.response?.status || error.message);
   }
 };
 
@@ -54,6 +64,12 @@ const loadFromExternalBackup = async () => {
   } catch (error) {
     console.error('❌ Failed to load from external backup:', error.message);
   }
+
+  if (memoryCache) {
+    console.log('🧠 Using memory cache as fallback');
+    return memoryCache;
+  }
+
   return null;
 };
 
@@ -81,7 +97,25 @@ server.get('/test-save', (req, res) => {
   res.json({
     message: 'Test endpoint - check console for data',
     timestamp: currentTime,
-    data: db.getState()
+    data: db.getState(),
+    lastSave: lastSaveTime,
+    hasMemoryCache: !!memoryCache,
+    backupConfigured: BACKUP_KEY !== '$2a$10$YourAPIKeyHere'
+  });
+});
+
+server.get('/status', (req, res) => {
+  const db = router.db;
+  res.json({
+    status: 'running',
+    timestamp: new Date().toISOString(),
+    lastSave: lastSaveTime,
+    hasMemoryCache: !!memoryCache,
+    backupConfigured: BACKUP_KEY !== '$2a$10$YourAPIKeyHere',
+    dataCount: {
+      days: db.get('days').size().value(),
+      settings: !!db.get('settings').value()
+    }
   });
 });
 
@@ -107,7 +141,7 @@ server.use((req, res, next) => {
       const db = router.db;
       if (db) {
         console.log('💾 Triggering save after', req.method, 'request');
-        saveData(db.getState()); // Note: não aguardamos aqui para não bloquear a resposta
+        saveData(db.getState());
       }
       originalSend.call(this, data);
     };
@@ -121,7 +155,6 @@ const port = process.env.PORT || 8080;
 server.listen(port, async () => {
   console.log('JSON Server is running on port', port);
 
-  // Tentar carregar dados do backup externo na inicialização
   const backupData = await loadFromExternalBackup();
   if (backupData) {
     const db = router.db;
@@ -129,7 +162,6 @@ server.listen(port, async () => {
     console.log('✅ Database restored from external backup');
   }
 
-  // Auto-save a cada 2 minutos (reduzido para testar mais rápido)
   setInterval(async () => {
     try {
       const db = router.db;
@@ -140,5 +172,5 @@ server.listen(port, async () => {
     } catch (error) {
       console.error('Auto-save error:', error);
     }
-  }, 2 * 60 * 1000); // 2 minutos
+  }, 2 * 60 * 1000);
 });
