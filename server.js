@@ -1,21 +1,60 @@
 const path = require('path');
 const cors = require('cors');
 const fs = require('fs');
+const axios = require('axios');
 const jsonServer = require('json-server');
-
 const server = jsonServer.create();
 const router = jsonServer.router(path.join(__dirname, 'db.json'));
 const middlewares = jsonServer.defaults();
 
-// Sistema de salvamento otimizado
-const saveData = (data) => {
+const BACKUP_URL = 'https://api.jsonbin.io/v3/b';
+const BACKUP_KEY = process.env.JSONBIN_API_KEY || '$2a$10$YourAPIKeyHere';
+let BACKUP_ID = process.env.JSONBIN_BIN_ID || null;
+
+const saveData = async (data) => {
+  const filePath = path.join(__dirname, 'db.json');
+  fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+  console.log('💾 Data saved to db.json at', new Date().toLocaleTimeString());
+
+  await saveToExternalBackup(data);
+};
+
+const saveToExternalBackup = async (data) => {
   try {
-    const filePath = path.join(__dirname, 'db.json');
-    fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
-    console.log('💾 Data saved at', new Date().toLocaleTimeString());
+    const config = {
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Master-Key': BACKUP_KEY
+      }
+    };
+
+    if (BACKUP_ID) {
+      await axios.put(`${BACKUP_URL}/${BACKUP_ID}`, data, config);
+      console.log('☁️ External backup updated successfully');
+    } else {
+
+      const response = await axios.post(BACKUP_URL, data, config);
+      BACKUP_ID = response.data.metadata.id;
+      console.log('☁️ External backup created with ID:', BACKUP_ID);
+    }
   } catch (error) {
-    console.error('❌ Save error:', error);
+    console.error('❌ External backup failed:', error.message);
   }
+};
+
+const loadFromExternalBackup = async () => {
+  try {
+    if (BACKUP_ID) {
+      const response = await axios.get(`${BACKUP_URL}/${BACKUP_ID}/latest`, {
+        headers: { 'X-Master-Key': BACKUP_KEY }
+      });
+      console.log('☁️ Data loaded from external backup');
+      return response.data.record;
+    }
+  } catch (error) {
+    console.error('❌ Failed to load from external backup:', error.message);
+  }
+  return null;
 };
 
 server.use(cors());
@@ -30,29 +69,33 @@ server.get('/settings', (req, res) => {
 server.get('/backup', (req, res) => {
   const db = router.db;
   const data = db.getState();
+  console.log('📊 Backup requested - Current data:', JSON.stringify(data, null, 2));
   res.json(data);
 });
 
 server.get('/test-save', (req, res) => {
   const db = router.db;
+  const currentTime = new Date().toISOString();
+  console.log('🧪 Test endpoint called at', currentTime);
+  console.log('📊 Current database state:', JSON.stringify(db.getState(), null, 2));
   res.json({
-    message: 'Server running',
-    timestamp: new Date().toISOString(),
-    dataCount: db.get('days').value().length
+    message: 'Test endpoint - check console for data',
+    timestamp: currentTime,
+    data: db.getState()
   });
 });
 
-server.post('/restore', (req, res) => {
+server.post('/restore', async (req, res) => {
   const db = router.db;
   db.setState(req.body);
-  saveData(req.body);
+  await saveData(req.body);
   res.json({ message: 'Data restored successfully' });
 });
 
-server.put('/settings', (req, res) => {
+server.put('/settings', async (req, res) => {
   const db = router.db;
   db.set('settings', req.body).write();
-  saveData(db.getState());
+  await saveData(db.getState());
   res.json(db.get('settings').value());
 });
 
@@ -64,7 +107,7 @@ server.use((req, res, next) => {
       const db = router.db;
       if (db) {
         console.log('💾 Triggering save after', req.method, 'request');
-        saveData(db.getState());
+        saveData(db.getState()); // Note: não aguardamos aqui para não bloquear a resposta
       }
       originalSend.call(this, data);
     };
@@ -75,19 +118,27 @@ server.use((req, res, next) => {
 server.use(router);
 
 const port = process.env.PORT || 8080;
-server.listen(port, () => {
-  console.log('🚀 JSON Server running on port', port);
+server.listen(port, async () => {
+  console.log('JSON Server is running on port', port);
 
-  // Auto-save reduzido para 5 minutos
-  setInterval(() => {
+  // Tentar carregar dados do backup externo na inicialização
+  const backupData = await loadFromExternalBackup();
+  if (backupData) {
+    const db = router.db;
+    db.setState(backupData);
+    console.log('✅ Database restored from external backup');
+  }
+
+  // Auto-save a cada 2 minutos (reduzido para testar mais rápido)
+  setInterval(async () => {
     try {
       const db = router.db;
       if (db) {
-        saveData(db.getState());
-        console.log('⏰ Auto-save at', new Date().toISOString());
+        await saveData(db.getState());
+        console.log('⏰ Auto-save completed at', new Date().toISOString());
       }
     } catch (error) {
       console.error('Auto-save error:', error);
     }
-  }, 5 * 60 * 1000); // 5 minutos
+  }, 2 * 60 * 1000); // 2 minutos
 });
